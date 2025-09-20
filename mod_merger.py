@@ -3,7 +3,6 @@ import sys
 import shutil
 import zipfile
 import py7zr
-import difflib
 import re
 import io
 import traceback
@@ -21,7 +20,6 @@ ARCHIVE_DIR = os.path.join(BASE_DIR, "OUTPUT_Merged_Mod")
 
 BASE_PAK_FILENAME = "data0.pak"
 BASE_FILENAME_IN_PAK = "scripts/player/player_variables.scr"
-# ***** ИСПРАВЛЕНИЕ ЗДЕСЬ: ВОССТАНОВЛЕНА НЕДОСТАЮЩАЯ СТРОКА *****
 FINAL_PLAYER_VARS_PATH = "scripts/player/player_variables.scr"
 FINAL_ARCHIVE_NAME = "data3.pak"
 PLAYER_VARS_MARKER = ".PLAYER_VARS.scr"
@@ -95,14 +93,15 @@ def process_archive_content(archive, archive_type, source_name):
             print(f"  -> Found and extracted '{member_path}'")
             found_player_vars = True
         else:
-            if member_path not in other_files_map:
-                other_files_map[member_path] = []
-            temp_filename = f"{source_name}_{os.path.basename(member_path)}"
-            temp_filepath = os.path.join(TEMP_DIR, temp_filename)
-            with open(temp_filepath, 'wb') as f:
-                f.write(read_file_from_archive(archive, archive_type, member.filename))
-            other_files_map[member_path].append({'source': source_name, 'temp_path': temp_filepath})
-            print(f"  -> Found additional file: '{member_path}'")
+            if not member_path.lower().endswith(('.zip', '.pak', '.7z')):
+                if member_path not in other_files_map:
+                    other_files_map[member_path] = []
+                temp_filename = f"{source_name}_{os.path.basename(member_path)}"
+                temp_filepath = os.path.join(TEMP_DIR, temp_filename)
+                with open(temp_filepath, 'wb') as f:
+                    f.write(read_file_from_archive(archive, archive_type, member.filename))
+                other_files_map[member_path].append({'source': source_name, 'temp_path': temp_filepath})
+                print(f"  -> Found additional file: '{member_path}'")
 
     return found_player_vars
 
@@ -162,11 +161,21 @@ def extract_mods():
         return False
     return True
 
-
 def analyze_and_resolve_player_vars(base_file_lines):
     print("\n--- Step 2: Analyzing player_variables.scr and Resolving Conflicts ---")
+
+    def parse_params(lines):
+        params = {}
+        for line in lines:
+            key = get_param_key(line)
+            if key:
+                params[key] = line.strip()
+        return params
+
+    base_params = parse_params(base_file_lines)
     changes_map = {}
     mod_files = [f for f in os.listdir(TEMP_DIR) if f.endswith(PLAYER_VARS_MARKER)]
+
     if not mod_files:
         print("'player_variables.scr' files not found for analysis.")
         return {}
@@ -176,20 +185,16 @@ def analyze_and_resolve_player_vars(base_file_lines):
         with open(mod_filepath, 'r', encoding='utf-8', errors='ignore') as f:
             mod_lines = f.readlines()
 
-        diff = difflib.unified_diff(base_file_lines, mod_lines, lineterm='')
-        lines = list(diff)
-        i = 0
-        while i < len(lines):
-            if lines[i].startswith('-') and not lines[i].startswith('---'):
-                if (i + 1 < len(lines)) and lines[i + 1].startswith('+') and not lines[i + 1].startswith('+++'):
-                    old_line, new_line = lines[i][1:], lines[i + 1][1:]
-                    key = get_param_key(old_line)
-                    if key:
-                        if key not in changes_map: changes_map[key] = []
-                        source_display_name = mod_filename.replace(PLAYER_VARS_MARKER, '')
-                        changes_map[key].append({'source': source_display_name, 'value': new_line.strip()})
-                    i += 1
-            i += 1
+        mod_params = parse_params(mod_lines)
+        source_display_name = mod_filename.replace(PLAYER_VARS_MARKER, '')
+
+        for key, mod_value in mod_params.items():
+            base_value = base_params.get(key)
+            if base_value != mod_value:
+                if key not in changes_map:
+                    changes_map[key] = []
+                if not any(c['value'] == mod_value for c in changes_map[key]):
+                    changes_map[key].append({'source': source_display_name, 'value': mod_value})
 
     final_changes = {}
     if not changes_map:
@@ -215,6 +220,7 @@ def analyze_and_resolve_player_vars(base_file_lines):
                         print("Error: Invalid number.")
                 except ValueError:
                     print("Error: Please enter a number.")
+
     return final_changes
 
 
@@ -251,10 +257,14 @@ def apply_changes_and_archive(base_file_lines, final_player_vars_changes, final_
     print("\n--- Step 4: Building Final File and Archiving ---")
 
     output_lines = list(base_file_lines)
-    for i, line in enumerate(output_lines):
-        key = get_param_key(line)
-        if key and key in final_player_vars_changes:
-            output_lines[i] = final_player_vars_changes[key] + '\n'
+    base_params_map = {get_param_key(line): i for i, line in enumerate(output_lines) if get_param_key(line)}
+
+    for key, new_value in final_player_vars_changes.items():
+        if key in base_params_map:
+            line_index = base_params_map[key]
+            output_lines[line_index] = new_value + '\n'
+        else:
+            output_lines.append(new_value + '\n')
 
     final_scr_content = "".join(output_lines)
     print("\nFinal 'player_variables.scr' successfully built in memory.")
