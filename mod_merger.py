@@ -3,6 +3,7 @@ import sys
 import shutil
 import zipfile
 import py7zr
+import rarfile
 import re
 import io
 import traceback
@@ -31,6 +32,7 @@ other_files_map = {}
 def get_archive_filenames(archive_obj, archive_type):
     if archive_type == 'zip': return archive_obj.namelist()
     if archive_type == '7z': return archive_obj.getnames()
+    if archive_type == 'rar': return archive_obj.namelist()
     return []
 
 
@@ -78,28 +80,44 @@ def get_param_key(line):
 
 def process_archive_content(archive, archive_type, source_name):
     found_player_vars = False
-    members = archive.list() if archive_type == '7z' else archive.infolist()
+    
+    if archive_type == 'rar':
+        members = archive.infolist()
+    elif archive_type == 'zip':
+        members = archive.infolist()
+    elif archive_type == '7z':
+        members = archive.list()
+    else:
+        members = []
 
     for member in members:
-        is_directory = member.is_directory if archive_type == '7z' else member.is_dir()
+        is_directory = False
+        member_path = ''
+        if archive_type in ['zip', 'rar']:
+            is_directory = member.is_dir()
+            member_path = member.filename
+        elif archive_type == '7z':
+            is_directory = member.is_directory
+            member_path = member.filename
+
         if is_directory: continue
 
-        member_path = member.filename.replace('\\', '/')
+        member_path = member_path.replace('\\', '/')
 
         if member_path.lower().endswith('player_variables.scr'):
             temp_filename = source_name + PLAYER_VARS_MARKER
             with open(os.path.join(TEMP_DIR, temp_filename), 'wb') as f:
-                f.write(read_file_from_archive(archive, archive_type, member.filename))
+                f.write(read_file_from_archive(archive, archive_type, member_path))
             print(f"  -> Found and extracted '{member_path}'")
             found_player_vars = True
         else:
-            if not member_path.lower().endswith(('.zip', '.pak', '.7z')):
+            if not any(member_path.lower().endswith(ext) for ext in ['.zip', '.pak', '.7z', '.rar']):
                 if member_path not in other_files_map:
                     other_files_map[member_path] = []
                 temp_filename = f"{source_name}_{os.path.basename(member_path)}"
                 temp_filepath = os.path.join(TEMP_DIR, temp_filename)
                 with open(temp_filepath, 'wb') as f:
-                    f.write(read_file_from_archive(archive, archive_type, member.filename))
+                    f.write(read_file_from_archive(archive, archive_type, member_path))
                 other_files_map[member_path].append({'source': source_name, 'temp_path': temp_filepath})
                 print(f"  -> Found additional file: '{member_path}'")
 
@@ -115,6 +133,8 @@ def extract_mods():
         print(f"Folder '{os.path.basename(MODS_DIR)}' is empty.")
         return False
 
+    found_any_player_vars = False
+
     for item_name in os.listdir(MODS_DIR):
         item_path = os.path.join(MODS_DIR, item_name)
         print(f"\nProcessing: {item_name}")
@@ -125,9 +145,16 @@ def extract_mods():
                 archive_type = 'zip'
             elif item_name.lower().endswith('.7z'):
                 archive_type = '7z'
+            elif item_name.lower().endswith('.rar'):
+                archive_type = 'rar'
 
             if archive_type:
-                archive_class = {'zip': zipfile.ZipFile, '7z': py7zr.SevenZipFile}[archive_type]
+                archive_class = {
+                    'zip': zipfile.ZipFile,
+                    '7z': py7zr.SevenZipFile,
+                    'rar': rarfile.RarFile
+                }[archive_type]
+
                 with archive_class(item_path, 'r') as archive:
                     filenames = get_archive_filenames(archive, archive_type)
                     pak_files = [f for f in filenames if f.lower().endswith('.pak')]
@@ -141,25 +168,36 @@ def extract_mods():
                         with zipfile.ZipFile(pak_stream, 'r') as pak_archive:
                             if process_archive_content(pak_archive, 'zip', item_name):
                                 found_in_pak = True
+                                found_any_player_vars = True
 
                     if not found_in_pak:
-                        print("  .pak not found, searching for files in the archive root...")
-                        process_archive_content(archive, archive_type, item_name)
+                        print(f"  No .pak found in '{item_name}', searching root...")
+                        if process_archive_content(archive, archive_type, item_name):
+                             found_any_player_vars = True
 
             elif item_name.lower().endswith('.scr'):
                 if 'player_variables' in item_name.lower():
                     temp_filename = item_name + PLAYER_VARS_MARKER
                     shutil.copy(item_path, os.path.join(TEMP_DIR, temp_filename))
+                    found_any_player_vars = True
             else:
-                print(f"  -> File skipped. Only .zip, .7z, .pak, and .scr files are supported.")
+                print(f"  -> File skipped. Only .zip, .7z, .pak, and .rar files are supported.")
 
+        except rarfile.NotRarFile:
+            print(f"  -> ERROR: '{item_name}' is not a valid RAR file or is corrupted.")
         except Exception as e:
             print(f"  -> ERROR processing '{item_name}': {e}.")
+            traceback.print_exc()
 
-    if not any(f.endswith(PLAYER_VARS_MARKER) for f in os.listdir(TEMP_DIR)):
-        print("\nCould not find any 'player_variables.scr' files to process.")
+    if not found_any_player_vars:
+        print("\nNote: No 'player_variables.scr' files were found. Will process other files if they exist.")
+
+    if not os.listdir(TEMP_DIR):
+        print("\nProcess finished: No compatible files were found in the mods folder to merge.")
         return False
+
     return True
+
 
 def analyze_and_resolve_player_vars(base_file_lines):
     print("\n--- Step 2: Analyzing player_variables.scr and Resolving Conflicts ---")
@@ -177,7 +215,7 @@ def analyze_and_resolve_player_vars(base_file_lines):
     mod_files = [f for f in os.listdir(TEMP_DIR) if f.endswith(PLAYER_VARS_MARKER)]
 
     if not mod_files:
-        print("'player_variables.scr' files not found for analysis.")
+        print("No 'player_variables.scr' files found for analysis. Skipping to other files.")
         return {}
 
     for mod_filename in mod_files:
@@ -256,19 +294,24 @@ def resolve_other_files():
 def apply_changes_and_archive(base_file_lines, final_player_vars_changes, final_other_files):
     print("\n--- Step 4: Building Final File and Archiving ---")
 
-    output_lines = list(base_file_lines)
-    base_params_map = {get_param_key(line): i for i, line in enumerate(output_lines) if get_param_key(line)}
+    if final_player_vars_changes:
+        output_lines = list(base_file_lines)
+        base_params_map = {get_param_key(line): i for i, line in enumerate(output_lines) if get_param_key(line)}
 
-    for key, new_value in final_player_vars_changes.items():
-        if key in base_params_map:
-            line_index = base_params_map[key]
-            output_lines[line_index] = new_value + '\n'
-        else:
-            output_lines.append(new_value + '\n')
-
-    final_scr_content = "".join(output_lines)
-    print("\nFinal 'player_variables.scr' successfully built in memory.")
-
+        for key, new_value in final_player_vars_changes.items():
+            if key in base_params_map:
+                line_index = base_params_map[key]
+                output_lines[line_index] = new_value + '\n'
+            else:
+                output_lines.append(new_value + '\n')
+        
+        final_scr_content = "".join(output_lines)
+        print("\nFinal 'player_variables.scr' successfully built in memory.")
+    else:
+        final_scr_content = None
+        if base_file_lines:
+            print("\nNo changes to 'player_variables.scr', won't be added to the final archive unless it's the only file.")
+            
     if os.path.exists(ARCHIVE_DIR): shutil.rmtree(ARCHIVE_DIR)
     os.makedirs(ARCHIVE_DIR)
     print(f"Folder '{os.path.basename(ARCHIVE_DIR)}' has been cleared and is ready.")
@@ -276,8 +319,9 @@ def apply_changes_and_archive(base_file_lines, final_player_vars_changes, final_
     archive_path = os.path.join(ARCHIVE_DIR, FINAL_ARCHIVE_NAME)
     print(f"Creating archive: {archive_path}")
     with zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED) as pak_archive:
-        pak_archive.writestr(FINAL_PLAYER_VARS_PATH.replace('/', os.sep), final_scr_content.encode('utf-8'))
-        print(f" -> '{FINAL_PLAYER_VARS_PATH}' added to archive.")
+        if final_scr_content:
+            pak_archive.writestr(FINAL_PLAYER_VARS_PATH.replace('/', os.sep), final_scr_content.encode('utf-8'))
+            print(f" -> '{FINAL_PLAYER_VARS_PATH}' added to archive.")
 
         for archive_dest_path, temp_source_path in final_other_files.items():
             pak_archive.write(temp_source_path, arcname=archive_dest_path.replace('/', os.sep))
@@ -294,7 +338,6 @@ def main():
             return
 
         if not extract_mods():
-            print("\nProcess finished as no suitable mods were found.")
             return
 
         final_player_vars = analyze_and_resolve_player_vars(base_lines)
