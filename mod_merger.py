@@ -19,7 +19,9 @@ MODS_DIR = os.path.join(BASE_DIR, "02_Put_Mods_Here")
 TEMP_DIR = os.path.join(BASE_DIR, "_temp_extracted_files")
 ARCHIVE_DIR = os.path.join(BASE_DIR, "OUTPUT_Merged_Mod")
 
-BASE_FILENAME = "player_variables.scr"
+BASE_PAK_FILENAME = "data0.pak"
+BASE_FILENAME_IN_PAK = "scripts/player/player_variables.scr"
+# ***** ИСПРАВЛЕНИЕ ЗДЕСЬ: ВОССТАНОВЛЕНА НЕДОСТАЮЩАЯ СТРОКА *****
 FINAL_PLAYER_VARS_PATH = "scripts/player/player_variables.scr"
 FINAL_ARCHIVE_NAME = "data3.pak"
 PLAYER_VARS_MARKER = ".PLAYER_VARS.scr"
@@ -27,7 +29,7 @@ PLAYER_VARS_MARKER = ".PLAYER_VARS.scr"
 other_files_map = {}
 
 
-# --- 2. UNIVERSAL HELPER FUNCTIONS (RESTORED) ---
+# --- 2. UNIVERSAL HELPER FUNCTIONS ---
 def get_archive_filenames(archive_obj, archive_type):
     if archive_type == 'zip': return archive_obj.namelist()
     if archive_type == '7z': return archive_obj.getnames()
@@ -52,6 +54,23 @@ def cleanup():
         print("\n--- Cleaning up temporary files ---")
         shutil.rmtree(TEMP_DIR)
         print("Temporary folder deleted.")
+
+
+def load_base_file_from_pak():
+    base_pak_path = os.path.join(BASE_FILE_DIR, BASE_PAK_FILENAME)
+    if not os.path.exists(base_pak_path):
+        print(f"\nCRITICAL ERROR: Base file container not found: {base_pak_path}")
+        print(f"Please ensure '{BASE_PAK_FILENAME}' is in the '{os.path.basename(BASE_FILE_DIR)}' folder.")
+        return None
+
+    try:
+        with zipfile.ZipFile(base_pak_path, 'r') as pak:
+            with pak.open(BASE_FILENAME_IN_PAK) as scr_file:
+                return scr_file.read().decode('utf-8', errors='ignore').splitlines(keepends=True)
+    except Exception as e:
+        print(f"\nCRITICAL ERROR: Could not read base file from '{BASE_PAK_FILENAME}': {e}")
+        print("Please ensure the archive is not corrupt and contains the required file.")
+        return None
 
 
 def get_param_key(line):
@@ -260,18 +279,13 @@ def apply_changes_and_archive(base_file_lines, final_player_vars_changes, final_
 def main():
     try:
         setup_directories()
-        base_file_path = os.path.join(BASE_FILE_DIR, BASE_FILENAME)
-        if not os.path.exists(base_file_path):
-            print(f"\nCRITICAL ERROR: Base file not found: {base_file_path}")
-            print(f"Please ensure the file '{BASE_FILENAME}' is in the '{os.path.basename(BASE_FILE_DIR)}' folder.")
+        base_lines = load_base_file_from_pak()
+        if base_lines is None:
             return
 
         if not extract_mods():
             print("\nProcess finished as no suitable mods were found.")
             return
-
-        with open(base_file_path, 'r', encoding='utf-8', errors='ignore') as f:
-            base_lines = f.readlines()
 
         final_player_vars = analyze_and_resolve_player_vars(base_lines)
         final_others = resolve_other_files()
