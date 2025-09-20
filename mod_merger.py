@@ -67,7 +67,6 @@ def load_base_file_from_pak():
                 return scr_file.read().decode('utf-8', errors='ignore').splitlines(keepends=True)
     except Exception as e:
         print(f"\nCRITICAL ERROR: Could not read base file from '{BASE_PAK_FILENAME}': {e}")
-        print("Please ensure the archive is not corrupt and contains the required file.")
         return None
 
 
@@ -78,31 +77,30 @@ def get_param_key(line):
 
 def process_archive_content(archive, archive_type, source_name):
     found_player_vars = False
-    members = archive.list() if archive_type == '7z' else archive.infolist()
+    members = archive.infolist() if archive_type == 'zip' else archive.list()
 
     for member in members:
-        is_directory = member.is_directory if archive_type == '7z' else member.is_dir()
-        if is_directory: continue
+        is_directory = member.is_dir() if archive_type == 'zip' else member.is_directory
+        member_path = member.filename
 
-        member_path = member.filename.replace('\\', '/')
+        if is_directory: continue
+        member_path = member_path.replace('\\', '/')
 
         if member_path.lower().endswith('player_variables.scr'):
             temp_filename = source_name + PLAYER_VARS_MARKER
             with open(os.path.join(TEMP_DIR, temp_filename), 'wb') as f:
-                f.write(read_file_from_archive(archive, archive_type, member.filename))
+                f.write(read_file_from_archive(archive, archive_type, member_path))
             print(f"  -> Found and extracted '{member_path}'")
             found_player_vars = True
         else:
-            if not member_path.lower().endswith(('.zip', '.pak', '.7z')):
-                if member_path not in other_files_map:
-                    other_files_map[member_path] = []
+            if not any(member_path.lower().endswith(ext) for ext in ['.zip', '.pak', '.7z']):
+                if member_path not in other_files_map: other_files_map[member_path] = []
                 temp_filename = f"{source_name}_{os.path.basename(member_path)}"
                 temp_filepath = os.path.join(TEMP_DIR, temp_filename)
                 with open(temp_filepath, 'wb') as f:
-                    f.write(read_file_from_archive(archive, archive_type, member.filename))
+                    f.write(read_file_from_archive(archive, archive_type, member_path))
                 other_files_map[member_path].append({'source': source_name, 'temp_path': temp_filepath})
                 print(f"  -> Found additional file: '{member_path}'")
-
     return found_player_vars
 
 
@@ -115,19 +113,22 @@ def extract_mods():
         print(f"Folder '{os.path.basename(MODS_DIR)}' is empty.")
         return False
 
+    found_any_player_vars = False
+
     for item_name in os.listdir(MODS_DIR):
         item_path = os.path.join(MODS_DIR, item_name)
         print(f"\nProcessing: {item_name}")
 
         try:
             archive_type = None
-            if item_name.lower().endswith(('.zip', '.pak')):
-                archive_type = 'zip'
-            elif item_name.lower().endswith('.7z'):
-                archive_type = '7z'
+            archive_class = None
 
-            if archive_type:
-                archive_class = {'zip': zipfile.ZipFile, '7z': py7zr.SevenZipFile}[archive_type]
+            if item_name.lower().endswith(('.zip', '.pak')):
+                archive_type, archive_class = 'zip', zipfile.ZipFile
+            elif item_name.lower().endswith('.7z'):
+                archive_type, archive_class = '7z', py7zr.SevenZipFile
+            
+            if archive_class:
                 with archive_class(item_path, 'r') as archive:
                     filenames = get_archive_filenames(archive, archive_type)
                     pak_files = [f for f in filenames if f.lower().endswith('.pak')]
@@ -141,24 +142,33 @@ def extract_mods():
                         with zipfile.ZipFile(pak_stream, 'r') as pak_archive:
                             if process_archive_content(pak_archive, 'zip', item_name):
                                 found_in_pak = True
-
+                                found_any_player_vars = True
+                    
                     if not found_in_pak:
-                        print("  .pak not found, searching for files in the archive root...")
-                        process_archive_content(archive, archive_type, item_name)
+                        if process_archive_content(archive, archive_type, item_name):
+                             found_any_player_vars = True
 
             elif item_name.lower().endswith('.scr'):
                 if 'player_variables' in item_name.lower():
                     temp_filename = item_name + PLAYER_VARS_MARKER
                     shutil.copy(item_path, os.path.join(TEMP_DIR, temp_filename))
+                    found_any_player_vars = True
             else:
                 print(f"  -> File skipped. Only .zip, .7z, .pak, and .scr files are supported.")
 
+        except (zipfile.BadZipFile, py7zr.exceptions.Bad7zFile):
+             print(f"  -> ERROR: '{item_name}' seems to be a corrupted or unsupported archive file.")
         except Exception as e:
             print(f"  -> ERROR processing '{item_name}': {e}.")
+            traceback.print_exc()
 
-    if not any(f.endswith(PLAYER_VARS_MARKER) for f in os.listdir(TEMP_DIR)):
-        print("\nCould not find any 'player_variables.scr' files to process.")
+    if not found_any_player_vars:
+        print("\nNote: No 'player_variables.scr' files were found. Will process other files if they exist.")
+
+    if not os.listdir(TEMP_DIR):
+        print("\nProcess finished: No compatible files were found in mods to merge.")
         return False
+
     return True
 
 def analyze_and_resolve_player_vars(base_file_lines):
@@ -168,8 +178,7 @@ def analyze_and_resolve_player_vars(base_file_lines):
         params = {}
         for line in lines:
             key = get_param_key(line)
-            if key:
-                params[key] = line.strip()
+            if key: params[key] = line.strip()
         return params
 
     base_params = parse_params(base_file_lines)
@@ -177,28 +186,24 @@ def analyze_and_resolve_player_vars(base_file_lines):
     mod_files = [f for f in os.listdir(TEMP_DIR) if f.endswith(PLAYER_VARS_MARKER)]
 
     if not mod_files:
-        print("'player_variables.scr' files not found for analysis.")
+        print("No 'player_variables.scr' files found for analysis. Skipping.")
         return {}
 
     for mod_filename in mod_files:
         mod_filepath = os.path.join(TEMP_DIR, mod_filename)
-        with open(mod_filepath, 'r', encoding='utf-8', errors='ignore') as f:
-            mod_lines = f.readlines()
-
+        with open(mod_filepath, 'r', encoding='utf-8', errors='ignore') as f: mod_lines = f.readlines()
         mod_params = parse_params(mod_lines)
         source_display_name = mod_filename.replace(PLAYER_VARS_MARKER, '')
-
         for key, mod_value in mod_params.items():
             base_value = base_params.get(key)
             if base_value != mod_value:
-                if key not in changes_map:
-                    changes_map[key] = []
+                if key not in changes_map: changes_map[key] = []
                 if not any(c['value'] == mod_value for c in changes_map[key]):
                     changes_map[key].append({'source': source_display_name, 'value': mod_value})
 
     final_changes = {}
     if not changes_map:
-        print("No parameter differences found in 'player_variables.scr' files compared to the base file.")
+        print("No parameter differences found compared to base file.")
         return {}
 
     for key, changes in sorted(changes_map.items()):
@@ -206,113 +211,87 @@ def analyze_and_resolve_player_vars(base_file_lines):
             final_changes[key] = changes[0]['value']
             print(f"[Auto] Applied change for '{key}' from '{changes[0]['source']}'.")
         else:
-            print(f"\n[CONFLICT] Multiple changes detected for parameter '{key}':")
-            for idx, change in enumerate(changes):
-                print(f"  {idx + 1}. '{change['value']}' (from {change['source']})")
+            print(f"\n[CONFLICT] Multiple changes for parameter '{key}':")
+            for idx, change in enumerate(changes): print(f"  {idx + 1}. '{change['value']}' (from {change['source']})")
             while True:
                 try:
-                    choice = int(input(f"Enter the number of the desired option (1-{len(changes)}): "))
+                    choice = int(input(f"Enter the number for the desired option (1-{len(changes)}): "))
                     if 1 <= choice <= len(changes):
                         final_changes[key] = changes[choice - 1]['value']
                         print(f"Option {choice} selected.")
                         break
-                    else:
-                        print("Error: Invalid number.")
-                except ValueError:
-                    print("Error: Please enter a number.")
-
+                    else: print("Error: Invalid number.")
+                except ValueError: print("Error: Please enter a number.")
     return final_changes
-
 
 def resolve_other_files():
     print("\n--- Step 3: Processing Additional Files ---")
     final_other_files = {}
     if not other_files_map:
-        print("No additional files found for processing.")
+        print("No additional files found.")
         return {}
-
     for path, sources in sorted(other_files_map.items()):
         if len(sources) == 1:
             final_other_files[path] = sources[0]['temp_path']
             print(f"[Auto] Added file '{path}' from mod '{sources[0]['source']}'.")
         else:
-            print(f"\n[CONFLICT] The same file '{path}' was found in multiple mods:")
-            for idx, source in enumerate(sources):
-                print(f"  {idx + 1}. Use version from mod '{source['source']}'")
+            print(f"\n[CONFLICT] File '{path}' was found in multiple mods:")
+            for idx, source in enumerate(sources): print(f"  {idx + 1}. Use version from mod '{source['source']}'")
             while True:
                 try:
-                    choice = int(input(f"Enter the number of the desired option (1-{len(sources)}): "))
+                    choice = int(input(f"Enter the number for the desired option (1-{len(sources)}): "))
                     if 1 <= choice <= len(sources):
                         final_other_files[path] = sources[choice - 1]['temp_path']
                         print(f"Option {choice} selected.")
                         break
-                    else:
-                        print("Error: Invalid number.")
-                except ValueError:
-                    print("Error: Please enter a number.")
+                    else: print("Error: Invalid number.")
+                except ValueError: print("Error: Please enter a number.")
     return final_other_files
-
 
 def apply_changes_and_archive(base_file_lines, final_player_vars_changes, final_other_files):
     print("\n--- Step 4: Building Final File and Archiving ---")
-
-    output_lines = list(base_file_lines)
-    base_params_map = {get_param_key(line): i for i, line in enumerate(output_lines) if get_param_key(line)}
-
-    for key, new_value in final_player_vars_changes.items():
-        if key in base_params_map:
-            line_index = base_params_map[key]
-            output_lines[line_index] = new_value + '\n'
-        else:
-            output_lines.append(new_value + '\n')
-
-    final_scr_content = "".join(output_lines)
-    print("\nFinal 'player_variables.scr' successfully built in memory.")
-
+    final_scr_content = None
+    if final_player_vars_changes:
+        output_lines = list(base_file_lines)
+        base_params_map = {get_param_key(line): i for i, line in enumerate(output_lines) if get_param_key(line)}
+        for key, new_value in final_player_vars_changes.items():
+            if key in base_params_map: output_lines[base_params_map[key]] = new_value + '\n'
+            else: output_lines.append(new_value + '\n')
+        final_scr_content = "".join(output_lines)
+        print("Final 'player_variables.scr' built in memory.")
     if os.path.exists(ARCHIVE_DIR): shutil.rmtree(ARCHIVE_DIR)
     os.makedirs(ARCHIVE_DIR)
-    print(f"Folder '{os.path.basename(ARCHIVE_DIR)}' has been cleared and is ready.")
-
+    print(f"Folder '{os.path.basename(ARCHIVE_DIR)}' is ready.")
     archive_path = os.path.join(ARCHIVE_DIR, FINAL_ARCHIVE_NAME)
     print(f"Creating archive: {archive_path}")
     with zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED) as pak_archive:
-        pak_archive.writestr(FINAL_PLAYER_VARS_PATH.replace('/', os.sep), final_scr_content.encode('utf-8'))
-        print(f" -> '{FINAL_PLAYER_VARS_PATH}' added to archive.")
-
+        if final_scr_content:
+            pak_archive.writestr(FINAL_PLAYER_VARS_PATH.replace('/', os.sep), final_scr_content.encode('utf-8'))
+            print(f" -> '{FINAL_PLAYER_VARS_PATH}' added.")
         for archive_dest_path, temp_source_path in final_other_files.items():
             pak_archive.write(temp_source_path, arcname=archive_dest_path.replace('/', os.sep))
-            print(f" -> '{archive_dest_path}' added to archive.")
-
+            print(f" -> '{archive_dest_path}' added.")
     print("\nArchive created successfully!")
-
 
 def main():
     try:
         setup_directories()
         base_lines = load_base_file_from_pak()
-        if base_lines is None:
-            return
-
-        if not extract_mods():
-            print("\nProcess finished as no suitable mods were found.")
-            return
-
+        if base_lines is None: return
+        if not extract_mods(): return
         final_player_vars = analyze_and_resolve_player_vars(base_lines)
         final_others = resolve_other_files()
-
         if final_player_vars or final_others:
             apply_changes_and_archive(base_lines, final_player_vars, final_others)
             print("\n\n=== Utility finished successfully! ===")
             print(f"Your finished mod can be found here: {os.path.join(ARCHIVE_DIR, FINAL_ARCHIVE_NAME)}")
         else:
-            print("\n\n=== Process finished. No changes were found to apply. ===")
-
+            print("\n\n=== Process finished. No changes to apply. ===")
     except Exception as e:
         print(f"\nA critical error occurred: {e}")
         traceback.print_exc()
     finally:
         cleanup()
-
 
 if __name__ == "__main__":
     main()
