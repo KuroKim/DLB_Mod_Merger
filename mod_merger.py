@@ -9,6 +9,69 @@ import traceback
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Union, Tuple
 
+
+# ... (весь код до функции apply_changes_and_archive остается без изменений) ...
+
+def apply_changes_and_archive(base_file_lines, final_player_vars_changes, final_other_files):
+    print("\n--- Step 4: Building Final File and Archiving ---")
+
+    output_lines = list(base_file_lines)
+    base_params_map = {get_param_key(line): i for i, line in enumerate(output_lines) if get_param_key(line)}
+
+    new_params = []
+
+    # 1. Сначала ЗАМЕНЯЕМ существующие параметры
+    for key, new_value in final_player_vars_changes.items():
+        if key in base_params_map:
+            line_index = base_params_map[key]
+            output_lines[line_index] = "    " + new_value + '\n'  # Добавим отступ для единообразия
+        else:
+            # Если ключа нет в базе - это НОВЫЙ параметр. Собираем их.
+            new_params.append(new_value)
+
+    # 2. Теперь ДОБАВЛЯЕМ новые параметры в правильное место
+    if new_params:
+        print(f"Found {len(new_params)} new parameters to add.")
+        # Ищем последнюю закрывающую скобку '}' для вставки ПЕРЕД ней
+        insertion_point = -1
+        for i in range(len(output_lines) - 1, 0, -1):
+            if "}" in output_lines[i]:
+                insertion_point = i
+                break
+
+        if insertion_point != -1:
+            print(f"Inserting new parameters before line {insertion_point + 1}.")
+            for param in reversed(new_params):  # Вставляем в обратном порядке, чтобы сохранить исходный
+                output_lines.insert(insertion_point, "    " + param + '\n')
+        else:
+            # Аварийный случай, если '}' не найдена - добавляем в конец
+            print("Warning: Could not find closing brace '}'. Appending new params to the end of the file.")
+            for param in new_params:
+                output_lines.append("    " + param + '\n')
+
+    final_scr_content = "".join(output_lines)
+    print("\nFinal 'player_variables.scr' successfully built in memory.")
+
+    if os.path.exists(ARCHIVE_DIR): shutil.rmtree(ARCHIVE_DIR)
+    os.makedirs(ARCHIVE_DIR)
+    print(f"Folder '{os.path.basename(ARCHIVE_DIR)}' has been cleared and is ready.")
+
+    archive_path = os.path.join(ARCHIVE_DIR, FINAL_ARCHIVE_NAME)
+    print(f"Creating archive: {archive_path}")
+    with zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED) as pak_archive:
+        pak_archive.writestr(FINAL_PLAYER_VARS_PATH.replace('/', os.sep), final_scr_content.encode('utf-8'))
+        print(f" -> '{FINAL_PLAYER_VARS_PATH}' added to archive.")
+
+        for archive_dest_path, temp_source_path in final_other_files.items():
+            pak_archive.write(temp_source_path, arcname=archive_dest_path.replace('/', os.sep))
+            print(f" -> '{archive_dest_path}' added to archive.")
+
+    print("\nArchive created successfully!")
+
+
+# ... (остальной код остается без изменений) ...
+# Я привожу его ниже для полноты
+
 # --- 1. SETUP PATHS AND CONSTANTS (.EXE-PROOF) ---
 if getattr(sys, 'frozen', False):
     BASE_DIR = Path(sys.executable).parent
