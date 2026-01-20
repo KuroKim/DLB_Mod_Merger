@@ -8,8 +8,6 @@ import io
 import traceback
 
 
-# ... (весь код до функции apply_changes_and_archive остается без изменений) ...
-
 def apply_changes_and_archive(base_file_lines, final_player_vars_changes, final_other_files):
     print("\n--- Step 4: Building Final File and Archiving ---")
 
@@ -66,9 +64,6 @@ def apply_changes_and_archive(base_file_lines, final_player_vars_changes, final_
 
     print("\nArchive created successfully!")
 
-
-# ... (остальной код остается без изменений) ...
-# Я привожу его ниже для полноты
 
 # --- 1. SETUP PATHS AND CONSTANTS (.EXE-PROOF) ---
 if getattr(sys, 'frozen', False):
